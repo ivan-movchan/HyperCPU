@@ -145,7 +145,7 @@ Thank you for your interest in HyperCPU.
 HyperCPU is brought to you by:
 
 * [HyperWin](https://github.com/HyperWinX) (2024 - present time) - idea, code, documentation.
-* [Ivan Movchan](https://github.com/ivan-movchan) (2025 - present time) - artwork, beta testing, example programs code.
+* [Ivan Movchan](https://github.com/ivan-movchan) (2025 - present time) - artwork, beta testing, code examples.
 
 ### License
 
