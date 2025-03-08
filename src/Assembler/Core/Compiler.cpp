@@ -1,12 +1,9 @@
 #include "pog/line_spec.h"
-#include <ios>
-#include <iterator>
 #include <print>
 #include <string>
 #include <fstream>
-#include <iostream>
 #include <utility>
-#include <variant>
+#include <iostream>
 
 #include <Core/BinaryTransformer.hpp>
 #include <Core/Compiler.hpp>
@@ -43,17 +40,16 @@ HCAsm::HCAsmCompiler::HCAsmCompiler(LogLevel lvl) : pool(32) {
     .symbol(";");
   parser.token(":")
     .symbol(":");
-  parser.token("<")
-    .symbol("<");
-  parser.token(">")
-    .symbol(">");
   parser.token(R"(\n)")
     .action([this]([[maybe_unused]] std::string_view tok) -> Value {
       ++parser.get_line_counter();
       parser.reset_line_offset();
       return {};
     });
-  
+
+  parser.token(R"(\.attr\(entry\))")
+    .symbol("entry");
+
   parser.token("#use")
     .fullword()
     .symbol("use");
@@ -104,22 +100,14 @@ HCAsm::HCAsmCompiler::HCAsmCompiler(LogLevel lvl) : pool(32) {
     .production("statement");
   parser.rule("statement")
     /* Reserved statements */
-    .production(".b8", "uint", ";", CompileRawValueb8)
-    .production(".b8", "binary", ";", CompileRawValueb8)
-    .production(".b8", "hex", ";", CompileRawValueb8)
-    .production(".b8", "char", ";", CompileRawValueb8)
-    .production(".b16", "uint", ";", CompileRawValueb16)
-    .production(".b16", "binary", ";", CompileRawValueb16)
-    .production(".b16", "hex", ";", CompileRawValueb16)
-    .production(".b32", "uint", ";", CompileRawValueb32)
-    .production(".b32", "binary", ";", CompileRawValueb32)
-    .production(".b32", "hex", ";", CompileRawValueb32)
-    .production(".b64", "uint", ";", CompileRawValueb64)
-    .production(".b64", "binary", ";", CompileRawValueb64)
-    .production(".b64", "hex", ";", CompileRawValueb64)
+    .production(".b8", "operand", ";", CompileRawValueb8)
+    .production(".b16", "operand", ";", CompileRawValueb16)
+    .production(".b32", "operand", ";", CompileRawValueb32)
+    .production(".b64", "operand", ";", CompileRawValueb64)
     .production("ident", "operand", ",", "operand", ";", CompileStatement1)
     .production("ident", "operand", ";", CompileStatement2)
     .production("ident", ";", CompileStatement3)
+    .production("entry", "ident", ":", CompileEntryLabel)
     .production("ident", ":", CompileLabel);
 
   parser.rule("operand")
@@ -199,10 +187,11 @@ std::uint8_t HCAsm::HCAsmCompiler::ModeToSize(Mode md) {
       return 2;
     case Mode::b32:
       return 4;
+    case Mode::b64_label:
     case Mode::b64:
       return 8;
     default:
-      std::unreachable();
+      std::abort();
   }
 }
 
@@ -289,7 +278,6 @@ std::uint8_t HCAsm::HCAsmCompiler::InstructionSize(HCAsm::Instruction& instr) {
       break;
     default:
       std::abort();
-
   }
 
   return result;
@@ -300,15 +288,19 @@ HCAsm::BinaryResult HCAsm::HCAsmCompiler::TransformToBinary(HCAsm::CompilerState
   logger.Log(LogLevel::DEBUG, "Running pass 1 - counting code size");
   
   for (auto& instr : ir.ir) {
-    if (std::holds_alternative<Instruction>(instr)) {
-      ir.code_size += InstructionSize(std::get<Instruction>(instr));
-    } else if (std::holds_alternative<Label>(instr)) {
-      auto& lbl = std::get<Label>(instr);
-      
-      ir.labels[lbl.name] = ir.code_size;
-    } else if (std::holds_alternative<RawValue>(instr)) {
-      ir.code_size += ModeToSize(std::get<RawValue>(instr).mode);
-    }
+    VisitVariant(instr,
+      [this, &ir](Instruction& instruction) mutable -> void {
+        ir.code_size += InstructionSize(instruction);
+      },
+      [&ir](Label& label) mutable -> void {
+        ir.labels[label.name] = ir.code_size;
+        if (label.is_entry_point) {
+          ir.entry_point = ir.code_size;
+        }
+      },
+      [this, &ir](RawValue& raw) mutable -> void {
+        ir.code_size += ModeToSize(raw.mode);
+      });
   }
 
   // Resolve references - pass 2
@@ -318,19 +310,18 @@ HCAsm::BinaryResult HCAsm::HCAsmCompiler::TransformToBinary(HCAsm::CompilerState
     logger.Log(LogLevel::DEBUG, "Resolving label references");
 
     for (auto& args : ir.pending_resolves) {
-      auto& operand = args.op;
+      auto operand = args.op;
 
-      if (ir.labels.contains(*operand.str)) {
-        args.op.type = OperandType::uint;
-        args.op.uint1 = ir.labels[*operand.str];
+      if (ir.labels.contains(*operand->str)) {
+        args.op->type = OperandType::uint;
+        args.op->uint1 = ir.labels[*operand->str];
       } else {
-        ThrowError(args.args[0], parser, std::format("failed to resolve undefined reference to \"{}\"", *operand.str));
+        ThrowError(args.args[0], parser, std::format("failed to resolve undefined reference to \"{}\"", *operand->str));
       }
     }
   }
 
   // Compile code - pass 3
-  std::println("Code size: {}", ir.code_size);
   BinaryResult binary = { new unsigned char[ir.code_size] };
   if (!binary.binary) {
     logger.Log(LogLevel::ERROR, "Failed to allocate memory for binary data!");
@@ -342,21 +333,29 @@ HCAsm::BinaryResult HCAsm::HCAsmCompiler::TransformToBinary(HCAsm::CompilerState
   BinaryTransformer transformer(binary, &ir);
 
   for (auto& instr : ir.ir) {
-    if (std::holds_alternative<Instruction>(instr)) {
-      auto& ins = std::get<Instruction>(instr);
-
-      transformer.EncodeInstruction(ins);
-    } else if (std::holds_alternative<RawValue>(instr)) {
-      auto& val = std::get<RawValue>(instr);
-      switch (val.mode) {
-        case Mode::b8:  binary.push(static_cast<std::uint8_t>(val.value)); break;
-        case Mode::b16: binary.push(static_cast<std::uint16_t>(val.value)); break;
-        case Mode::b32: binary.push(static_cast<std::uint32_t>(val.value)); break;
-        case Mode::b64: binary.push(static_cast<std::uint64_t>(val.value)); break;
-        default: std::unreachable();
-      }
-    }
+    VisitVariant(instr, 
+      [&transformer](Instruction& instruction) mutable -> void {
+        transformer.EncodeInstruction(instruction);
+      },
+      [&binary, &ir, this](RawValue& raw) mutable -> void {
+        switch (raw.mode) {
+          case Mode::b8:  binary.push(static_cast<std::uint8_t>(raw.value.uint1)); break;
+          case Mode::b16: binary.push(static_cast<std::uint16_t>(raw.value.uint1)); break;
+          case Mode::b32: binary.push(static_cast<std::uint32_t>(raw.value.uint1)); break;
+          case Mode::b64_label:
+            if (!ir.labels.contains(*raw.value.str)) {
+              ThrowError(*raw.value.tokens[1], parser, std::format("failed to resolve undefined reference to \"{}\"", *raw.value.str));
+            }
+            binary.push(static_cast<std::uint64_t>(ir.labels.at(*raw.value.str)));
+            break;
+          case Mode::b64: binary.push(static_cast<std::uint64_t>(raw.value.uint1)); break;
+          default: std::abort();
+        }
+      },
+      [](Label&){});
   }
+
+  binary.entry_point = ir.entry_point;
 
   return binary;
 }
@@ -395,12 +394,13 @@ std::string_view HCAsm::FindLine(const pog::LineSpecialization& line_spec, const
   std::exit(1);
 }
 
-void HCAsm::WriteResultFile(HyperCPU::FileType type, HCAsm::BinaryResult& result, std::ofstream& output, std::uint32_t code_size) {
+void HCAsm::WriteResultFile(HyperCPU::FileType type, HCAsm::BinaryResult& result, std::ofstream& output, std::uint32_t code_size, std::uint32_t entry_point) {
   HyperCPU::GenericHeader gen_header;
   gen_header.type = type;
   gen_header.magic = HyperCPU::magic;
   gen_header.version = HyperCPU::current_version;
   gen_header.code_size = code_size;
+  gen_header.entry_point = entry_point;
   output.write(reinterpret_cast<char*>(&gen_header), sizeof(gen_header));
 
   output.write(reinterpret_cast<char*>(result.binary), code_size);

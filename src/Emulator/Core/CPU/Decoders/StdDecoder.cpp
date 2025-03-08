@@ -13,7 +13,7 @@
 #include <utility>
 
 
-#define dcdr_assert(expr) RaiseException((expr)); if (decoder_halted) return {}
+#define dcdr_assert(expr) RaiseException((expr)); if (cpu && cpu->pending_interrupt.has_value()) return {.m_opcode = _CONT, .m_opcode_mode = b64, .m_op_types = NONE, .m_op1 = 0, .m_op2 = 0, .addr_extension_status = HyperCPU::AddrExtensionStatus::Disabled, .extension = 0}
 
 void HyperCPU::Decoder::RaiseException(bool expr) noexcept {
   if (!(expr)) {
@@ -22,7 +22,6 @@ void HyperCPU::Decoder::RaiseException(bool expr) noexcept {
       std::exit(1);
     } else {
       cpu->TriggerInterrupt(HyperCPU::cpu_exceptions::IO);
-      decoder_halted = true;
     }
   }
 }

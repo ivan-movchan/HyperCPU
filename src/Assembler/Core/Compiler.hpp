@@ -42,6 +42,7 @@ namespace HCAsm {
     b16 = 0b01,
     b32 = 0b10,
     b64 = 0b11,
+    b64_label,
     none
   };
 
@@ -67,7 +68,7 @@ namespace HCAsm {
 
   struct RawValue {
     enum Mode mode;
-    std::uint64_t value;
+    Operand value; // Label resolver requires reference to operand
   };
 
   struct Value {
@@ -77,14 +78,19 @@ namespace HCAsm {
   struct Label {
     std::string name;
     std::uint64_t index;
+    bool is_entry_point;
   };
 
   template<typename T>
   concept UnsignedIntegral = std::is_integral_v<T> && std::is_unsigned_v<T>;
 
   struct BinaryResult {
+    BinaryResult() : binary(nullptr), ptr(0), entry_point(0) { }
+    BinaryResult(unsigned char* ptr) : binary(ptr), ptr(0), entry_point(0) { }
+
     unsigned char* binary;
     std::uint64_t ptr;
+    std::uint32_t entry_point;
 
     template<UnsignedIntegral T>
     constexpr inline void push(T data) {
@@ -98,17 +104,30 @@ namespace HCAsm {
   };
 
   struct PendingLabelReferenceResolve {
-    Operand& op;
+    Operand* op;
     std::vector<pog::TokenWithLineSpec<Value>> args;
   };
 
-  struct LineCounter {
-    int a;
+  // Some magic for std::visit
+  template<typename... T>
+  struct MakeOverload : T... {
+    using T::operator()...;
   };
+
+  template<typename... T>
+  MakeOverload(T...) -> MakeOverload<T...>;
+
+  template<typename Variant, typename... Alternatives>
+  constexpr inline decltype(auto) VisitVariant(Variant&& variant, Alternatives&&... alternatives) {
+    return std::visit(
+      MakeOverload{std::forward<Alternatives>(alternatives)..., [](auto const&){}},
+      variant
+    );
+  }
 
   // Needs improvements and optimizations
   struct CompilerState {
-    CompilerState(hpool::HPool<pog::TokenWithLineSpec<Value>, hpool::ReallocationPolicy::OffsetRealloc>& pool) : pool(pool), code_size(0) { }
+    CompilerState(hpool::HPool<pog::TokenWithLineSpec<Value>, hpool::ReallocationPolicy::OffsetRealloc>& pool) : pool(pool), code_size(0), entry_point(0) { }
 
     std::vector<PendingLabelReferenceResolve> pending_resolves;
     std::vector<pog::TokenWithLineSpec<Value>> tmp_args;
@@ -116,6 +135,7 @@ namespace HCAsm {
     std::unordered_map<std::string, std::uint64_t> labels;
     hpool::HPool<pog::TokenWithLineSpec<Value>, hpool::ReallocationPolicy::OffsetRealloc>& pool;
     std::uint64_t code_size;
+    std::uint32_t entry_point;
   };
 
   constexpr inline Mode ModeFromRegister(HyperCPU::Registers reg) {
@@ -169,7 +189,7 @@ namespace HCAsm {
   }
 
   std::string_view FindLine(const pog::LineSpecialization&, const std::string_view&);
-  void WriteResultFile(HyperCPU::FileType type, HCAsm::BinaryResult& result, std::ofstream& output, std::uint32_t code_size);
+  void WriteResultFile(HyperCPU::FileType type, HCAsm::BinaryResult& result, std::ofstream& output, std::uint32_t code_size, std::uint32_t entry_point);
 
   [[noreturn]] void ThrowError(pog::TokenWithLineSpec<Value>& err_token, pog::Parser<Value>& parser, std::string err_msg);
 
@@ -196,6 +216,7 @@ namespace HCAsm {
   Value CompileStatement1(pog::Parser<Value>&, std::vector<pog::TokenWithLineSpec<Value>>&& args);
   Value CompileStatement2(pog::Parser<Value>&, std::vector<pog::TokenWithLineSpec<Value>>&& args);
   Value CompileStatement3(pog::Parser<Value>&, std::vector<pog::TokenWithLineSpec<Value>>&& args);
+  Value CompileEntryLabel(pog::Parser<Value>&, std::vector<pog::TokenWithLineSpec<Value>>&& args);
   Value CompileLabel(pog::Parser<Value>&, std::vector<pog::TokenWithLineSpec<Value>>&& args);
   Value CompileRawValueb8(pog::Parser<Value>&, std::vector<pog::TokenWithLineSpec<Value>>&& args);
   Value CompileRawValueb16(pog::Parser<Value>&, std::vector<pog::TokenWithLineSpec<Value>>&& args);

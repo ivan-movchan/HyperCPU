@@ -1,3 +1,6 @@
+#include <print>
+#include <atomic>
+#include <thread>
 #include <functional>
 
 #include <Core/MemoryController/MemoryControllerMT.hpp>
@@ -13,6 +16,7 @@ HyperCPU::CPU::CPU(std::size_t core_count, std::size_t mem_size, char* binary, s
   core_count(core_count),
   total_mem(mem_size),
   halted(false),
+  ivt_initialized(false),
   io_ctl(std::make_unique<SimpleIOImpl>()) {
     // Initializing all register pointers
     std::memset(&data, 0, sizeof(data));
@@ -129,20 +133,124 @@ HyperCPU::CPU::~CPU() {
   delete mem_controller;
 }
 
-void HyperCPU::CPU::Run() {
-  while (1) {
-    if (halted) return;
-    
-    HyperCPU::IInstruction instr = m_decoder->FetchAndDecode();
-    if (m_decoder->IsHalted()) {
-      halted = true;
+/*
+void HyperCPU::CPU::DecodingThread() {
+  bool skip_decoding_cycle = false;
+  bool current = false;
+  while (!halted) {
+    if (skip_decoding_cycle) {
+      skip_decoding_cycle = false;
+      
+      // Wait for executor thread to execute instruction
+      current = buffer_used.load(std::memory_order_acquire);
+      while (current) {
+        buffer_used.wait(current, std::memory_order_acquire);
+        current = buffer_used.load(std::memory_order_acquire);
+      }
       continue;
     }
-    std::pair<void*, void*> operands = GetOperands(instr.m_op_types, instr.m_opcode_mode, instr.m_op1, instr.m_op2);
-    opcode_handler_assoc[static_cast<std::uint16_t>(instr.m_opcode)](instr, operands.first, operands.second);
+
+    if (pending_interrupt.has_value()) {
+      while (current) {
+        buffer_used.wait(current, std::memory_order_acquire);
+        current = buffer_used.load(std::memory_order_acquire);
+      }
+      StackPush64(*xip);
+      *xip = pending_interrupt.value();
+      pending_interrupt.reset();
+      continue;
+    }
+
+    _buffer = m_decoder->FetchAndDecode();
+
+    switch (_buffer.m_opcode) {
+      case CALL:
+      case JMP:
+      case HALT:
+        skip_decoding_cycle = true;
+        break;
+      case _CONT:
+        continue;
+      default:
+        break;
+    }
+    
+    if (interrupt_active.load(std::memory_order_acquire)) {
+      skip_decoding_cycle = false;
+      continue;
+    } else if (buffer_used.load(std::memory_order_acquire)) {
+      current = buffer_used.load(std::memory_order_acquire);
+      while (current) {
+        buffer_used.wait(current, std::memory_order_acquire);
+        current = buffer_used.load(std::memory_order_acquire);
+      }
+    }
+
+    std::swap(buffer, _buffer);
+
+    buffer_used.store(true, std::memory_order_release);
+    buffer_used.notify_one();
+  } 
+}
+
+void HyperCPU::CPU::ExecutingThread() {
+  while (!halted) {
+    bool current = buffer_used.load(std::memory_order_acquire);
+    while (!current) {
+      buffer_used.wait(current, std::memory_order_acquire);
+      current = buffer_used.load(std::memory_order_acquire);
+    }
+
+    std::pair<void*, void*> operands = GetOperands(buffer.m_op_types, buffer.m_opcode_mode, buffer.m_op1, buffer.m_op2);
+    opcode_handler_assoc[static_cast<std::uint16_t>(buffer.m_opcode)](buffer, operands.first, operands.second);
+
+    buffer_used.store(false, std::memory_order_release);
+    buffer_used.notify_one();
   }
+}
+*/
+
+void HyperCPU::CPU::Run() {
+  /*
+  std::thread decoder_thread(std::bind(&CPU::DecodingThread, this));
+  std::thread executor_thread(std::bind(&CPU::ExecutingThread, this));
+
+  decoder_thread.join();
+  executor_thread.join();
+  */
+
+  bool skip_decoding_cycle = false;
+  while (!halted) {
+    if (skip_decoding_cycle) {
+      skip_decoding_cycle = false;
+      continue;
+    }
+
+    if (pending_interrupt.has_value()) {
+      StackPush64(*xip);
+      *xip = pending_interrupt.value();
+      pending_interrupt.reset();
+      continue;
+    }
+
+    buffer = m_decoder->FetchAndDecode();
+
+    switch (buffer.m_opcode) { 
+      case _CONT:
+        continue;
+      default:
+        break;
+    }
+
+    std::pair<void*, void*> operands = GetOperands(buffer.m_op_types, buffer.m_opcode_mode, buffer.m_op1, buffer.m_op2);
+    opcode_handler_assoc[static_cast<std::uint16_t>(buffer.m_opcode)](buffer, operands.first, operands.second);
+  } 
 }
 
 bool HyperCPU::CPU::CanExecuteInterrupts() {
   return *xivt != 0;
+}
+
+void HyperCPU::CPU::SetEntryPoint(std::uint32_t entry_point) {
+  *xip = entry_point;
 }

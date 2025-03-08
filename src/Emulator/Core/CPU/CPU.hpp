@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <memory>
+#include <atomic>
 
 #include <Core/MemoryController/IMemoryController.hpp>
 #include <Core/CPU/Interrupts/ReservedInterrupts.hpp>
@@ -49,6 +50,7 @@ namespace HyperCPU {
 
     // Specific registers
     std::uint64_t *xbp, *xsp, *xip, *xgdp, *xivt;
+    bool ivt_initialized;
 
     // Flags
     bool crf, ovf, udf;
@@ -72,6 +74,13 @@ namespace HyperCPU {
     // Interrupts
     void TriggerInterrupt(HyperCPU::cpu_exceptions exception);
     void RunInterruptSubroutine();
+
+    // Pipeline implementation
+    std::atomic<bool> buffer_used, interrupt_active;
+    IInstruction buffer, _buffer;
+    std::optional<std::uint64_t> pending_interrupt;
+    void DecodingThread();
+    void ExecutingThread();
     
     // All instructions
     DECLARE_INSTR(ADD);
@@ -111,6 +120,7 @@ namespace HyperCPU {
     void Run();
 
     bool CanExecuteInterrupts();
+    void SetEntryPoint(std::uint32_t entry_point);
     
     ~CPU();
   };
